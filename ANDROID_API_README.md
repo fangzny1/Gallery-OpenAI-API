@@ -41,8 +41,8 @@ POST http://<手机局域网IP>:8080/v1/chat/completions
 
 这意味着：
 1. **必须先**在 App 里把模型跑起来（下载 + 初始化），点开关才有意义。
-2. 同一时刻只能有一个推理在跑（本地 runtime 不支持并发多轮），并发请求会返回 409。
-3. 服务器只服务「当前选中的那个模型」。
+2. 同一时刻只能有一个推理在跑（本地 runtime 不支持并发多轮），并发请求会自动**排队**依次执行，不会报错。
+3. 服务器只服务「当前选中的那个模型」（`model` 字段会被忽略，始终用当前激活模型）。
 
 ## 使用步骤
 
@@ -53,10 +53,13 @@ OAuth 凭据后正常构建即可（新增的 NanoHTTPD 依赖会自动从 Maven
 ### 运行
 1. 手机和电脑连同一个 Wi-Fi（局域网）。
 2. 打开 App → 进入 AI Chat → 下载并初始化一个模型。
-3. 点顶栏的「链接」图标（图选址在历史图标旁边）。
-4. 启动成功会弹出 snackbar，显示服务器地址，例如：
+3. 点顶栏的「链接」图标（History 图标旁边的 Link 图标），弹出 API 设置弹窗。
+4. 在弹窗里：
+   - 打开 **Enable API server** 开关启动服务器；
+   - （可选）在 **API access token** 里填一个 token 并保存，开启 Bearer Token 鉴权。
+5. 启动成功会弹出 snackbar，显示服务器地址，例如：
    `Local API server started at http://192.168.1.5:8080`
-5. 在电脑上测试：
+6. 在电脑上测试：
 
 ```bash
 # 列出可用模型
@@ -65,13 +68,19 @@ curl http://192.168.1.5:8080/v1/models
 # 普通调用（一次性返回）
 curl http://192.168.1.5:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gemma","messages":[{"role":"user","content":"你好，介绍一下你自己"}],"stream":false}'
+  -d '{"messages":[{"role":"user","content":"你好，介绍一下你自己"}],"stream":false}'
 
 # 流式调用（SSE，边推理边吐字）
 curl -N http://192.168.1.5:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gemma","messages":[{"role":"user","content":"讲个笑话"}],"stream":true}'
+  -d '{"messages":[{"role":"user","content":"讲个笑话"}],"stream":true}'
 ```
+
+> 如果开启了 Token 鉴权，所有请求都要额外带 `Authorization: Bearer <token>` 头，
+> 未带或错误会返回 `401`。例如：
+> ```bash
+> curl -H "Authorization: Bearer 你的token" http://192.168.1.5:8080/v1/models
+> ```
 
 用 Python `openai` 库（把 base_url 指向手机）：
 
@@ -93,13 +102,25 @@ print(resp.choices[0].message.content)
 - **点了开关提示 "Failed to start local API server"**：通常是端口 8080 被占用或没网络权限。
   代码里默认端口是 8080，可改 `OpenAiApiServer.kt` 的 `startServer(port = 8080)`。
 - **"No active model"**：模型还没初始化。先进聊天界面确保模型下载并跑起来。
-- **"Another request is already in progress"**：本地 runtime 一次只能跑一个推理，等上一个完成。
+- **并发请求**：本地 runtime 一次只能跑一个推理，并发请求会自动排队依次执行（不会报错）。
 - **手机能访问但电脑不行**：确认同一局域网、路由没开 AP 隔离；服务器监听在 0.0.0.0（默认）。
-- **`multimodal`（图片/音频）暂不支持**：当前只处理纯文本 `user` 消息，取最后一条作为 prompt。
+- **浏览器 / 网页客户端连不上**：确认用的是 `http://`（不是 `https://`），且地址带 `/v1`；
+  服务器已支持 CORS 预检，浏览器跨域可访问。
+- **中文乱码 / 返回 "Invalid request body"**：需重新编译最新代码（已修复 keep-alive 下的
+  请求体读取和 UTF-8 解码）。
+
+## 已支持的功能
+
+- ✅ **多轮上下文**：请求里的完整 `messages` 数组会转成 LiteRT 消息传给模型，模型能记住对话历史。
+- ✅ **新建对话自动重置**：客户端开新对话时带上自己的历史，上一场对话不会被串进来。
+- ✅ **图片理解（Ask Image）**：支持多模态模型，通过 `image_url`（base64 data URL）传图。
+- ✅ **Bearer Token 鉴权**：设置 token 后未带/错误 token 的请求返回 401。
+- ✅ **请求排队**：并发请求自动排队，替代原来的 409。
+- ✅ **CORS**：支持浏览器跨域访问（网页端 Chat 客户端可用）。
 
 ## 已知限制 / 后续可扩展
 
-- 目前只取最后一条 user 消息作为 prompt，**没有把多轮对话上下文回传给模型**。
-  要做多轮保留，需要把 `messages` 数组转成 LiteRT 的 `Message` 列表传给 executor。
-- `temperature` / `max_tokens` 参数当前被读取但未真正应用（本地模型用自带配置）。
+- `temperature` / `max_tokens` 参数当前被读取但未真正应用（本地模型用自身配置）。
+- 图片仅支持 base64 data URL（`data:image/...;base64,...`），暂不支持远程 URL 或文件路径。
 - 可通过 `model` 字段 + 多模型管理扩展成「按模型名路由」。
+- 鉴权是局域网级别的 Bearer Token，非生产级安全（足够共享网络防误用）。
