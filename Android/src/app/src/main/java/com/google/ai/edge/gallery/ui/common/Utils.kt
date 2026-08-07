@@ -1,0 +1,507 @@
+/*
+ * Copyright 2025 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.google.ai.edge.gallery.ui.common
+
+import android.Manifest
+import android.content.ClipData
+import android.content.ContentResolver
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.icu.text.CompactDecimalFormat
+import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
+import android.util.Log
+import androidx.activity.compose.ManagedActivityResultLauncher
+import androidx.compose.animation.core.Easing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush.Companion.linearGradient
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import com.google.ai.edge.gallery.data.Model
+import com.google.ai.edge.gallery.data.Task
+import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
+import java.io.File
+import java.io.FileOutputStream
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
+import java.util.Locale
+import kotlin.math.ln
+import kotlin.math.pow
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+
+private const val TAG = "AGUtils"
+
+val SMALL_BUTTON_CONTENT_PADDING =
+  PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 8.dp)
+
+/** Format the bytes into a human-readable format. */
+fun Long.humanReadableSize(si: Boolean = true, extraDecimalForGbAndAbove: Boolean = false): String {
+  val bytes = this
+
+  val unit = if (si) 1000 else 1024
+  if (bytes < unit) return "$bytes B"
+  val exp = (ln(bytes.toDouble()) / ln(unit.toDouble())).toInt()
+  val pre = (if (si) "kMGTPE" else "KMGTPE")[exp - 1] + if (si) "" else "i"
+  var formatString = "%.1f %sB"
+  if (extraDecimalForGbAndAbove && pre.lowercase() != "k" && pre != "M") {
+    formatString = "%.2f %sB"
+  }
+  return formatString.format(bytes / unit.toDouble().pow(exp.toDouble()), pre)
+}
+
+fun Float.humanReadableDuration(): String {
+  val milliseconds = this
+  if (milliseconds < 1000) {
+    return "$milliseconds ms"
+  }
+  val seconds = milliseconds / 1000f
+  if (seconds < 60) {
+    return "%.1f s".format(seconds)
+  }
+
+  val minutes = seconds / 60f
+  if (minutes < 60) {
+    return "%.1f min".format(minutes)
+  }
+
+  val hours = minutes / 60f
+  return "%.1f h".format(hours)
+}
+
+fun Long.formatToHourMinSecond(): String {
+  val ms = this
+  if (ms < 0) {
+    return "-"
+  }
+
+  val seconds = ms / 1000
+  val hours = seconds / 3600
+  val minutes = (seconds % 3600) / 60
+  val remainingSeconds = seconds % 60
+
+  val parts = mutableListOf<String>()
+
+  if (hours > 0) {
+    parts.add("$hours h")
+  }
+  if (minutes > 0) {
+    parts.add("$minutes min")
+  }
+  if (remainingSeconds > 0 || (hours == 0L && minutes == 0L)) {
+    parts.add("$remainingSeconds sec")
+  }
+
+  return parts.joinToString(" ")
+}
+
+/**
+ * Formats large counts (e.g. downloads, likes) into localized abbreviated strings (e.g. 1.2K,
+ * 3.4M).
+ */
+fun formatCount(count: Long): String {
+  return CompactDecimalFormat.getInstance(
+      Locale.getDefault(),
+      CompactDecimalFormat.CompactStyle.SHORT,
+    )
+    .format(count)
+}
+
+/**
+ * Formats an ISO-8601 last modified date string to a localized medium date format according to
+ * device locale settings.
+ */
+fun formatLastModifiedDate(lastModified: String): String {
+  if (lastModified.isBlank()) return ""
+  return try {
+    val instant = Instant.parse(lastModified)
+    val formatter =
+      DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)
+        .withZone(ZoneId.systemDefault())
+        .withLocale(Locale.getDefault())
+    formatter.format(instant)
+  } catch (e: Exception) {
+    if (lastModified.contains("T")) lastModified.substringBefore("T") else lastModified
+  }
+}
+
+/** Returns true if the Uri scheme is "http" or "https" (case-insensitive). */
+fun isHttpOrHttps(uri: Uri): Boolean =
+  uri.scheme?.equals("http", ignoreCase = true) == true ||
+    uri.scheme?.equals("https", ignoreCase = true) == true
+
+fun getDistinctiveColor(index: Int): Color {
+  val colors =
+    listOf(
+      //      Color(0xffe6194b),
+      Color(0xff3cb44b),
+      Color(0xffffe119),
+      Color(0xff4363d8),
+      Color(0xfff58231),
+      Color(0xff911eb4),
+      Color(0xff46f0f0),
+      Color(0xfff032e6),
+      Color(0xffbcf60c),
+      Color(0xfffabebe),
+      Color(0xff008080),
+      Color(0xffe6beff),
+      Color(0xff9a6324),
+      Color(0xfffffac8),
+      Color(0xff800000),
+      Color(0xffaaffc3),
+      Color(0xff808000),
+      Color(0xffffd8b1),
+      Color(0xff000075),
+    )
+  return colors[index % colors.size]
+}
+
+fun Context.createTempPictureUri(
+  fileName: String = "picture_${System.currentTimeMillis()}",
+  fileExtension: String = ".png",
+): Uri {
+  val tempFile = File.createTempFile(fileName, fileExtension, cacheDir).apply { createNewFile() }
+
+  return FileProvider.getUriForFile(
+    applicationContext,
+    "com.google.ai.edge.gallery.provider" /* {applicationId}.provider */,
+    tempFile,
+  )
+}
+
+fun checkNotificationPermissionAndStartDownload(
+  context: Context,
+  launcher: ManagedActivityResultLauncher<String, Boolean>,
+  modelManagerViewModel: ModelManagerViewModel,
+  task: Task?,
+  model: Model,
+) {
+  // Check permission
+  when (PackageManager.PERMISSION_GRANTED) {
+    // Already got permission. Call the lambda.
+    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) -> {
+      modelManagerViewModel.downloadModel(task = task, model = model)
+    }
+
+    // Otherwise, ask for permission
+    else -> {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
+      }
+    }
+  }
+}
+
+fun ensureValidFileName(fileName: String): String {
+  return fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+}
+
+/**
+ * A composable that animates text appearing to "swipe" into view from left to right.
+ *
+ * This effect is created by animating a linear gradient brush that colors the text, combined with
+ * an alpha animation for fading. The text gradually becomes visible as the gradient moves across
+ * it, revealing the full text by the end of the animation.
+ */
+@Composable
+fun SwipingText(
+  text: String,
+  style: TextStyle,
+  color: Color,
+  modifier: Modifier = Modifier,
+  animationDelay: Long = 0,
+  animationDurationMs: Int = 300,
+  edgeGradientRelativeSize: Float = 1.0f,
+) {
+  val progress =
+    rememberDelayedAnimationProgress(
+      initialDelay = animationDelay,
+      animationDurationMs = animationDurationMs,
+      animationLabel = "swiping text",
+      easing = LinearEasing,
+    )
+  Text(
+    text,
+    style =
+      style.copy(
+        brush =
+          linearGradient(
+            colorStops =
+              arrayOf(
+                (1f + edgeGradientRelativeSize) * progress - edgeGradientRelativeSize to color,
+                (1f + edgeGradientRelativeSize) * progress to Color.Transparent,
+              )
+          )
+      ),
+    modifier = modifier.graphicsLayer { alpha = progress },
+  )
+}
+
+/**
+ * A composable that animates the revelation of text using a linear gradient mask.
+ *
+ * The text appears to "wipe" into view from left to right, controlled by an animation progress.
+ * This is achieved by drawing a gradient mask over the text that moves horizontally, revealing the
+ * content as the animation progresses.
+ *
+ * The core of the revelation effect relies on `BlendMode.DstOut`. First, the text content
+ * (`drawContent()`) is rendered as the "destination." Then, a rectangle filled with a `maskBrush`
+ * (our linear gradient) is drawn as the "source." `DstOut` works by taking the destination (the
+ * text) and making transparent any parts that overlap with the opaque (non-transparent) regions of
+ * the source (the red part of our mask). As the `maskBrush` animates and slides across the text,
+ * the transparent portion of the mask "reveals" the text, creating the wipe-in effect.
+ */
+@Composable
+fun RevealingText(
+  text: String,
+  style: TextStyle,
+  modifier: Modifier = Modifier,
+  annotatedText: AnnotatedString? = null,
+  animationDelay: Long = 0,
+  animationDurationMs: Int = 300,
+  edgeGradientRelativeSize: Float = 0.5f,
+  extraTextPadding: Dp = 16.dp,
+) {
+  val progress =
+    rememberDelayedAnimationProgress(
+      initialDelay = animationDelay,
+      animationDurationMs = animationDurationMs,
+      animationLabel = "revealing text",
+    )
+  val maskBrush =
+    linearGradient(
+      colorStops =
+        arrayOf(
+          (1f + edgeGradientRelativeSize) * progress - edgeGradientRelativeSize to
+            Color.Transparent,
+          (1f + edgeGradientRelativeSize) * progress to Color.Red,
+        )
+    )
+  Box(
+    modifier =
+      modifier
+        .graphicsLayer(alpha = 0.99f, compositingStrategy = CompositingStrategy.Offscreen)
+        .drawWithContent {
+          drawContent()
+          drawRect(brush = maskBrush, blendMode = BlendMode.DstOut)
+        },
+    contentAlignment = Alignment.Center,
+  ) {
+    if (annotatedText != null) {
+      Text(annotatedText, style = style, modifier = Modifier.padding(horizontal = extraTextPadding))
+    } else {
+      Text(text, style = style, modifier = Modifier.padding(horizontal = extraTextPadding))
+    }
+  }
+}
+
+/** Another version of RevealingText with animationProgress passed in. */
+@Composable
+fun RevealingText(
+  text: String,
+  style: TextStyle,
+  animationProgress: Float,
+  modifier: Modifier = Modifier,
+  textAlign: TextAlign? = null,
+  edgeGradientRelativeSize: Float = 0.5f,
+) {
+  val maskBrush =
+    linearGradient(
+      colorStops =
+        arrayOf(
+          (1f + edgeGradientRelativeSize) * animationProgress - edgeGradientRelativeSize to
+            Color.Transparent,
+          (1f + edgeGradientRelativeSize) * animationProgress to Color.Red,
+        )
+    )
+  Box(
+    modifier =
+      modifier
+        .graphicsLayer(alpha = 0.99f, compositingStrategy = CompositingStrategy.Offscreen)
+        .drawWithContent {
+          drawContent()
+          drawRect(brush = maskBrush, blendMode = BlendMode.DstOut)
+        },
+    contentAlignment = Alignment.Center,
+  ) {
+    Text(
+      text,
+      style = style,
+      modifier = modifier.padding(horizontal = 16.dp),
+      textAlign = textAlign,
+    )
+  }
+}
+
+/**
+ * A reusable Composable function that provides an animated float progress value after an initial
+ * delay.
+ *
+ * This function is ideal for creating "enter" animations that start after a specified pause,
+ * allowing for staggered or timed visual effects. It uses `animateFloatAsState` to smoothly
+ * transition the progress from 0f to 1f.
+ */
+@Composable
+fun rememberDelayedAnimationProgress(
+  initialDelay: Long = 0,
+  animationDurationMs: Int,
+  animationLabel: String,
+  easing: Easing = FastOutSlowInEasing,
+): Float {
+  var startAnimation by remember { mutableStateOf(false) }
+  val progress: Float by
+    animateFloatAsState(
+      if (startAnimation) 1f else 0f,
+      label = animationLabel,
+      animationSpec = tween(durationMillis = animationDurationMs, easing = easing),
+    )
+  LaunchedEffect(Unit) {
+    delay(initialDelay)
+    startAnimation = true
+  }
+  return progress
+}
+
+suspend fun Context.shareBitmap(
+  bitmap: Bitmap,
+  fileName: String = "shared_image.png",
+  dispatcher: CoroutineDispatcher = Dispatchers.IO,
+) {
+  withContext(dispatcher) {
+    try {
+      val cachePath = File(cacheDir, "images")
+      cachePath.mkdirs()
+      val tempFile = File(cachePath, fileName)
+      FileOutputStream(tempFile).use { outputStream ->
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
+      }
+      val contentUri =
+        FileProvider.getUriForFile(this@shareBitmap, "$packageName.provider", tempFile)
+      val shareIntent =
+        Intent().apply {
+          action = Intent.ACTION_SEND
+          putExtra(Intent.EXTRA_STREAM, contentUri)
+          addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+          type = "image/png"
+          clipData = ClipData.newRawUri("", contentUri)
+        }
+      startActivity(Intent.createChooser(shareIntent, "Share Image"))
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to share bitmap", e)
+    }
+  }
+}
+
+suspend fun Context.copyBitmapToClipboard(
+  bitmap: Bitmap,
+  fileName: String = "copied_image.png",
+  dispatcher: CoroutineDispatcher = Dispatchers.IO,
+) {
+  withContext(dispatcher) {
+    try {
+      val cachePath = File(cacheDir, "images")
+      cachePath.mkdirs()
+      val tempFile = File(cachePath, fileName)
+      FileOutputStream(tempFile).use { outputStream ->
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
+      }
+      val contentUri =
+        FileProvider.getUriForFile(this@copyBitmapToClipboard, "$packageName.provider", tempFile)
+      val clipboard =
+        getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+      val clip = ClipData.newUri(contentResolver, "Image", contentUri)
+      clipboard.setPrimaryClip(clip)
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to copy bitmap to clipboard", e)
+    }
+  }
+}
+
+suspend fun Context.saveBitmapToMediaStore(
+  bitmap: Bitmap,
+  fileName: String,
+  dispatcher: CoroutineDispatcher = Dispatchers.IO,
+): Boolean {
+  return withContext(dispatcher) {
+    val resolver: ContentResolver = contentResolver
+    val imageCollection: Uri =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+      } else {
+        MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+      }
+
+    val contentValues =
+      ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+        put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+        put(MediaStore.Images.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
+        put(MediaStore.Images.Media.DATE_TAKEN, System.currentTimeMillis())
+      }
+
+    var imageUri: Uri? = null
+    try {
+      imageUri = resolver.insert(imageCollection, contentValues) ?: return@withContext false
+      val success =
+        resolver.openOutputStream(imageUri)?.use { outputStream ->
+          bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
+        } ?: false
+
+      if (!success) {
+        resolver.delete(imageUri, null, null)
+      }
+      success
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to save bitmap to MediaStore", e)
+      imageUri?.let { resolver.delete(it, null, null) }
+      false
+    }
+  }
+}

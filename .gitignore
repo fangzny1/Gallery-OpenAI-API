@@ -1,0 +1,40 @@
+# macOS
+.DS_Store
+
+# Android Studio / IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Gradle
+.gradle/
+build/
+Android/src/build/
+Android/src/app/build/
+Android/src/.gradle/
+gradle-daemon-jvm.properties
+
+# Local properties (SDK paths, machine-specific)
+local.properties
+
+# Signing / keystores (NEVER commit these)
+*.jks
+*.keystore
+*.p12
+
+# Secrets / local config
+*.env
+.env
+.env.local
+
+# Logs
+*.log
+
+# Misc
+*.apk
+*.aab
+*.hprof
