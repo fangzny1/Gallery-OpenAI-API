@@ -49,6 +49,7 @@ import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.SamplerConfig
+import com.google.ai.edge.litertlm.ToolCall
 import com.google.ai.edge.litertlm.ToolProvider
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.CancellationException
@@ -204,6 +205,7 @@ object LlmChatModelHelper : LlmModelHelper {
     supportAudio: Boolean,
     systemInstruction: Contents?,
     tools: List<ToolProvider>,
+    automaticToolCalling: Boolean,
     enableConversationConstrainedDecoding: Boolean,
     initialMessages: List<Message>,
   ) {
@@ -244,6 +246,7 @@ object LlmChatModelHelper : LlmModelHelper {
               },
             systemInstruction = systemInstruction,
             tools = tools,
+            automaticToolCalling = automaticToolCalling,
             initialMessages = initialMessages,
           )
         )
@@ -304,6 +307,7 @@ object LlmChatModelHelper : LlmModelHelper {
     audioClips: List<ByteArray>,
     coroutineScope: CoroutineScope?,
     extraContext: Map<String, String>?,
+    onToolCall: (List<ToolCall>) -> Unit,
   ) {
     val instance = model.instance as? LlmModelInstance
     if (instance == null) {
@@ -339,6 +343,12 @@ object LlmChatModelHelper : LlmModelHelper {
       Contents.of(contents),
       object : MessageCallback {
         override fun onMessage(message: Message) {
+          // When automatic tool calling is disabled, the conversation surfaces tool calls
+          // (instead of executing them). Forward them to the caller so it can hand them back to
+          // the client (e.g. the OpenAI API server) for client-driven execution.
+          if (message.toolCalls.isNotEmpty()) {
+            onToolCall(message.toolCalls)
+          }
           resultListener(message.toString(), false, message.channels[THOUGHT_CHANNEL])
         }
 

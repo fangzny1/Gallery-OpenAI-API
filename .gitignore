@@ -38,3 +38,6 @@ local.properties
 *.apk
 *.aab
 *.hprof
+
+# Local dev notes (not for upload)
+AGENTS.md.kotlin/

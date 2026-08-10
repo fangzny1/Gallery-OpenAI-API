@@ -33,6 +33,7 @@ import com.google.ai.edge.gallery.runtime.ResultListener
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.Role
+import com.google.ai.edge.litertlm.ToolCall
 import com.google.ai.edge.litertlm.ToolProvider
 import com.google.mlkit.genai.common.DownloadStatus
 import com.google.mlkit.genai.common.FeatureStatus
@@ -199,6 +200,7 @@ object AICoreModelHelper : LlmModelHelper {
     supportAudio: Boolean,
     systemInstruction: Contents?,
     tools: List<ToolProvider>,
+    automaticToolCalling: Boolean,
     enableConversationConstrainedDecoding: Boolean,
     initialMessages: List<Message>,
   ) {
@@ -250,6 +252,7 @@ object AICoreModelHelper : LlmModelHelper {
     audioClips: List<ByteArray>,
     coroutineScope: CoroutineScope?,
     extraContext: Map<String, String>?,
+    onToolCall: (List<ToolCall>) -> Unit,
   ) {
     val instance = model.instance as? AICoreModelInstance
     if (instance == null) {

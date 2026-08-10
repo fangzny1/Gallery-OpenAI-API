@@ -21,6 +21,7 @@ import android.graphics.Bitmap
 import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Message
+import com.google.ai.edge.litertlm.ToolCall
 import com.google.ai.edge.litertlm.ToolProvider
 import kotlinx.coroutines.CoroutineScope
 
@@ -71,6 +72,9 @@ interface LlmModelHelper {
    * @param supportAudio whether to preserve support for audio input.
    * @param systemInstruction new system instruction to guide the model's behavior after reset.
    * @param tools new or updated tools available for the model.
+   * @param automaticToolCalling whether the runtime should auto-execute tool calls. When false,
+   *   tool calls are surfaced to the caller (via [runInference]'s [onToolCall]) instead of being
+   *   executed automatically, enabling client-driven tool calling.
    * @param enableConversationConstrainedDecoding whether to enable constrained decoding.
    * @param initialMessages messages used to reinitialize conversation history on reset.
    */
@@ -80,6 +84,7 @@ interface LlmModelHelper {
     supportAudio: Boolean = false,
     systemInstruction: Contents? = null,
     tools: List<ToolProvider> = listOf(),
+    automaticToolCalling: Boolean = true,
     enableConversationConstrainedDecoding: Boolean = false,
     initialMessages: List<Message> = listOf(),
   )
@@ -104,6 +109,8 @@ interface LlmModelHelper {
    * @param audioClips optional list of audio clips provided as input context.
    * @param coroutineScope optional coroutine scope for async inference execution.
    * @param extraContext optional extra context for inference.
+   * @param onToolCall optional callback invoked when the model emits tool calls while
+   *   [resetConversation] was called with [automaticToolCalling] = false.
    */
   fun runInference(
     model: Model,
@@ -115,6 +122,7 @@ interface LlmModelHelper {
     audioClips: List<ByteArray> = listOf(),
     coroutineScope: CoroutineScope? = null,
     extraContext: Map<String, String>? = null,
+    onToolCall: ((List<ToolCall>) -> Unit) = {},
   )
 
   /**

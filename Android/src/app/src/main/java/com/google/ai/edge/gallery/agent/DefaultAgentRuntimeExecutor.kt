@@ -26,6 +26,7 @@ import com.google.ai.edge.gallery.tools.ToolDispatcher
 import com.google.ai.edge.gallery.tools.ToolExecutionContext
 import com.google.ai.edge.gallery.tools.ToolsProvider
 import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.ToolCall
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.channels.ProducerScope
 import kotlinx.coroutines.channels.awaitClose
@@ -116,6 +117,9 @@ open class DefaultAgentRuntimeExecutor(
         ?.mapNotNull { (k, v) -> if (k is String && v is String) k to v else null }
         ?.toMap()
         ?.ifEmpty { null }
+    // Client-driven tool calling: when requested, forward model-emitted tool calls to the caller
+    // as events instead of discarding them.
+    val captureToolCalls = request.metadata[AgentRequest.CAPTURE_TOOL_CALLS] == "true"
     if (curModel.instance == null) {
       try {
         curModel.awaitInitialization()
@@ -161,6 +165,11 @@ open class DefaultAgentRuntimeExecutor(
         Log.e(TAG, "Error in AgentLoop inference: $errorMsg")
         emitEvent(AgentEvent.Error(errorMessage = errorMsg))
         close()
+      },
+      onToolCall = { toolCalls ->
+        if (captureToolCalls) {
+          emitEvent(AgentEvent.ToolCalls(toolCalls = toolCalls))
+        }
       },
     )
 

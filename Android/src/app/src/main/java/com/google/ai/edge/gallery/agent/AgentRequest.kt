@@ -30,5 +30,12 @@ data class AgentRequest(
 ) {
   companion object {
     const val LITERTLM_EXTRA_CONTEXT = "litertlm_extra_context"
+
+    /**
+     * When set to `"true"` in [metadata], the executor forwards model-emitted tool calls to the
+     * caller as [AgentEvent.ToolCalls] events instead of discarding them. Used by the OpenAI API
+     * server for client-driven tool calling.
+     */
+    const val CAPTURE_TOOL_CALLS = "capture_tool_calls"
   }
 }

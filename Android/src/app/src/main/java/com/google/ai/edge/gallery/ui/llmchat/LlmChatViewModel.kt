@@ -293,6 +293,11 @@ open class LlmChatViewModelBase(
             setPreparing(false)
             onError(event.errorMessage)
           }
+          is AgentEvent.ToolCalls -> {
+            // Client-driven tool calling is only enabled by the OpenAI API server; the in-app
+            // chat never sets the capture flag, so this branch is normally unreachable.
+            Log.w(TAG, "Unexpected tool calls in in-app chat: ${event.toolCalls.map { it.name }}")
+          }
           is AgentEvent.LoopCancelled -> {
             setInProgress(false)
             setPreparing(false)

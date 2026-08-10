@@ -16,6 +16,8 @@
 
 package com.google.ai.edge.gallery.agent
 
+import com.google.ai.edge.litertlm.ToolCall
+
 /**
  * Sealed hierarchy representing all lifecycle and streaming events emitted by
  * [AgentRuntimeExecutor].
@@ -48,6 +50,16 @@ sealed interface AgentEvent {
    * @property finalResponse The complete, accumulated response text produced during the turn.
    */
   data class LoopTerminated(val finalResponse: String) : AgentEvent
+
+  /**
+   * Emitted when the model requests tool calls (client-driven tool calling mode). This only occurs
+   * when the conversation was created with automatic tool calling disabled (see
+   * `LlmModelHelper.resetConversation` [`automaticToolCalling`]); the caller is expected to execute
+   * the tools and feed the results back on the next turn.
+   *
+   * @property toolCalls The tool calls the model wants to make.
+   */
+  data class ToolCalls(val toolCalls: List<ToolCall>) : AgentEvent
 
   /**
    * Emitted when an agent turn is prematurely cancelled by the caller, indicating that all

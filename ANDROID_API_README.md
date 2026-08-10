@@ -29,6 +29,8 @@ POST http://<手机局域网IP>:8080/v1/chat/completions
 | `Android/src/app/src/main/res/values/strings.xml` | 新增几条 UI 文案 |
 | `Android/src/gradle/libs.versions.toml` | 新增 NanoHTTPD 依赖 |
 | `Android/src/app/build.gradle.kts` | 引入 NanoHTTPD |
+| `Android/src/app/.../runtime/LlmModelHelper.kt`、`ui/llmchat/LlmChatModelHelper.kt`、`runtime/aicore/AICoreModelHelper.kt` | 支持工具调用：`resetConversation` 加 `automaticToolCalling`、`runInference` 加 `onToolCall`（手工/客户端驱动模式） |
+| `Android/src/app/.../agent/AgentEvent.kt`、`AgentRequest.kt`、`DefaultAgentRuntimeExecutor.kt`、`ui/llmchat/LlmChatViewModel.kt` | 新增 `AgentEvent.ToolCalls` 事件并按需转发模型发出的工具调用 |
 
 ## 工作原理（重要概念）
 
@@ -97,8 +99,110 @@ print(resp.choices[0].message.content)
 
 6. 再点一下「链接」图标即可关闭服务器。
 
+## 工具调用（Function Calling）
+
+服务器支持 OpenAI 的**客户端驱动**工具调用：客户端定义 `tools`，模型决定调用某个工具时，
+服务器不是自己在手机上执行，而是把 `tool_calls` 返回给客户端；客户端执行后把结果以
+`role: "tool"` 的消息回传，模型再基于结果继续回答。
+
+用 curl 完整走一遍（两步）——第一步模型返回 `tool_calls`，第二步回传工具结果得到最终回答：
+
+```bash
+# ① 模型要求调用 get_current_time
+curl -N http://<手机IP>:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"现在几点了？用 get_current_time 查"}],
+       "tools":[{"type":"function","function":{"name":"get_current_time",
+                 "description":"获取当前时间",
+                 "parameters":{"type":"object","properties":{}}}}],
+       "stream":false}'
+# → 返回 tool_calls:[{id:"call_local_0", function:{name:"get_current_time", arguments:"{}"}}], finish_reason:"tool_calls"
+
+# ② 客户端"执行"工具后，把 assistant 的 tool_calls 和 tool 结果一起回传
+curl -N http://<手机IP>:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[
+         {"role":"user","content":"现在几点了？用 get_current_time 查"},
+         {"role":"assistant","content":null,
+          "tool_calls":[{"id":"call_local_0","type":"function",
+                         "function":{"name":"get_current_time","arguments":"{}"}}]},
+         {"role":"tool","tool_call_id":"call_local_0",
+          "content":"{\"time\":\"2026-08-10 12:44:00\"}"}],
+       "tools":[{"type":"function","function":{"name":"get_current_time",
+                 "description":"获取当前时间",
+                 "parameters":{"type":"object","properties":{}}}}],
+       "stream":false}'
+# → 返回最终回答，如 "现在是 2026年8月10日 12:44:00。"
+```
+
+用 Python `openai` 库实测（`tools` → `tool_calls` → `tool` 结果 → 最终回答）：
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://192.168.1.5:8080/v1", api_key="not-needed")
+
+# 1. 定义一个工具（函数）
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "查询某个城市的天气",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string", "description": "城市名，如 北京"}
+                },
+                "required": ["city"],
+            },
+        },
+    }
+]
+
+# 2. 第一次请求：模型会要求调用 get_weather
+resp = client.chat.completions.create(
+    model="any",
+    messages=[{"role": "user", "content": "北京的天气怎么样？"}],
+    tools=tools,
+)
+msg = resp.choices[0].message
+print("tool_calls:", msg.tool_calls)  # finish_reason = "tool_calls"
+
+# 3. 客户端"执行"工具（这里是模拟），再把结果回传
+tool_call = msg.tool_calls[0]
+tool_result = '{"temperature": 23, "condition": "晴"}'
+messages = [
+    {"role": "user", "content": "北京的天气怎么样？"},
+    msg,  # assistant 的 tool_calls 消息也要带上
+    {
+        "role": "tool",
+        "tool_call_id": tool_call.id,
+        "content": tool_result,
+    },
+]
+
+# 4. 第二次请求：模型基于工具结果给出最终回答
+final = client.chat.completions.create(model="any", messages=messages, tools=tools)
+print(final.choices[0].message.content)
+```
+
+要点：
+
+- 只有请求里带 `tools` 时才会启用工具调用；不带 `tools` 的行为和原来完全一致。
+- 工具调用走**客户端驱动**：服务器不执行工具，只把 `tool_calls` 交还给你。
+- 回传 `tool` 结果时，`messages` 里要带上前面那条带 `tool_calls` 的 `assistant` 消息，
+  并保持 `tool_call_id` 与返回的 `id` 一致。
+- 流式（`stream: true`）下，工具调用会以单个 `delta.tool_calls` 块整体返回（不做逐字符增量）。
+- 工具调用目前只支持 LlmChat（Gemma 等 Magic LM）模型；AICore 模型不支持。
+
 ## 常见问题
 
+- **工具调用不生效**：先 `curl http://<手机IP>:8080/debug` 看 `lastDiagnostics`——
+  - `toolCount` 为 `0` 说明请求里没带 `tools`（或格式不对），客户端没把工具发过来。
+  - `toolCount > 0` 但 `toolCallEvents == 0` 说明模型没有发出工具调用（工具 schema 没被模型识别）。
+  - `toolCallEvents > 0` 说明工具调用已捕获、多轮回传有问题。
+  - 该端点返回最近一次请求的诊断信息，无需 adb / logcat。
 - **点了开关提示 "Failed to start local API server"**：通常是端口 8080 被占用或没网络权限。
   代码里默认端口是 8080，可改 `OpenAiApiServer.kt` 的 `startServer(port = 8080)`。
 - **"No active model"**：模型还没初始化。先进聊天界面确保模型下载并跑起来。
@@ -114,6 +218,7 @@ print(resp.choices[0].message.content)
 - ✅ **多轮上下文**：请求里的完整 `messages` 数组会转成 LiteRT 消息传给模型，模型能记住对话历史。
 - ✅ **新建对话自动重置**：客户端开新对话时带上自己的历史，上一场对话不会被串进来。
 - ✅ **图片理解（Ask Image）**：支持多模态模型，通过 `image_url`（base64 data URL）传图。
+- ✅ **工具调用（Function Calling）**：支持 OpenAI 的 `tools` 参数，返回 `tool_calls` 交给客户端执行（见下文）。
 - ✅ **Bearer Token 鉴权**：设置 token 后未带/错误 token 的请求返回 401。
 - ✅ **请求排队**：并发请求自动排队，替代原来的 409。
 - ✅ **CORS**：支持浏览器跨域访问（网页端 Chat 客户端可用）。
@@ -122,5 +227,7 @@ print(resp.choices[0].message.content)
 
 - `temperature` / `max_tokens` 参数当前被读取但未真正应用（本地模型用自身配置）。
 - 图片仅支持 base64 data URL（`data:image/...;base64,...`），暂不支持远程 URL 或文件路径。
+- 工具调用为**客户端驱动**：服务器不执行工具，只返回 `tool_calls`；且只支持 LlmChat（Gemma 等）模型，AICore 模型不支持。
+- 流式工具调用以单个 `delta.tool_calls` 块返回，不做逐字符增量（多数客户端可接受，但严格按迹解析的客户端可能要求增量）。
 - 可通过 `model` 字段 + 多模型管理扩展成「按模型名路由」。
 - 鉴权是局域网级别的 Bearer Token，非生产级安全（足够共享网络防误用）。
