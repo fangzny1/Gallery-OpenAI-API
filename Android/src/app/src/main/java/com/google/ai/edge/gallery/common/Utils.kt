@@ -75,6 +75,10 @@ inline fun <reified T> getJsonResponse(url: String): JsonObjAndTextContent<T>? {
   try {
     val connection = URL(url).openConnection() as HttpURLConnection
     connection.requestMethod = "GET"
+    // Fail fast instead of hanging on slow/blocked connections (e.g. unreachable
+    // raw.githubusercontent.com). The caller falls back to cached data on failure.
+    connection.connectTimeout = 5_000
+    connection.readTimeout = 5_000
     connection.connect()
 
     val responseCode = connection.responseCode

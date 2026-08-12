@@ -986,7 +986,17 @@ constructor(
         }
 
         if (modelAllowlist == null) {
-          // Load from github.
+          // Cache-first: use the allowlist saved from a previous successful fetch so the UI
+          // doesn't block on a network request. The internet refresh runs afterwards.
+          modelAllowlist = readModelAllowlistFromDisk()
+          if (modelAllowlist != null) {
+            Log.d(TAG, "Using cached model allowlist from disk")
+            processModelAllowlist(modelAllowlist = modelAllowlist)
+            refreshModelAllowlistFromInternet()
+            return@launch
+          }
+
+          // No cache: load from github.
           var version = BuildConfig.VERSION_NAME.replace(".", "_")
           val url = getAllowlistUrl(version)
           Log.d(TAG, "Loading model allowlist from internet. Url: $url")
@@ -994,8 +1004,7 @@ constructor(
           modelAllowlist = data?.jsonObj
 
           if (modelAllowlist == null) {
-            Log.w(TAG, "Failed to load model allowlist from internet. Trying to load it from disk")
-            modelAllowlist = readModelAllowlistFromDisk()
+            Log.w(TAG, "Failed to load model allowlist from internet.")
           } else {
             Log.d(TAG, "Done: loading model allowlist from internet")
             saveModelAllowlistToDisk(modelAllowlistContent = data?.textContent ?: "{}")
@@ -1007,112 +1016,151 @@ constructor(
           return@launch
         }
 
-        Log.d(TAG, "Allowlist: $modelAllowlist")
-
-        val isAICoreAvailable by lazy {
-          Log.d(TAG, "loadModelAllowlist: Checking AICore availability")
-          // Build a fast-lookup set of all supported device models.
-          // This extracts the models from all allowed groups, flattens them into a single stream,
-          // lowercases them for case-insensitive matching, and stores them in a Set.
-          val allowedDeviceModelsSet =
-            modelAllowlist.aicoreRequirements
-              ?.allowedDeviceGroups
-              ?.asSequence()
-              ?.flatMap { it.deviceModels }
-              ?.map { it.lowercase() }
-              ?.toSet()
-          isAICoreSupported(allowedDeviceModelsSet)
-        }
-
-        // Convert models in the allowlist.
-        Log.d(
-          TAG,
-          "loadModelAllowlist: Converting models. Total models: ${modelAllowlist.models.size}",
-        )
-        val curTasks = getActiveCustomTasks().map { it.task }
-        val nameToModel = mutableMapOf<String, Model>()
-        for (allowedModel in modelAllowlist.models) {
-          if (allowedModel.disabled == true) {
-            continue
-          }
-
-          if (allowedModel.runtimeType == RuntimeType.AICORE && !isAICoreAvailable) {
-            continue
-          }
-
-          // Ignore the allowedModel if its accelerator is only npu and this device's soc is not in
-          // its socToModelFiles.
-          val accelerators = allowedModel.defaultConfig?.accelerators ?: ""
-          val acceleratorList = accelerators.split(",").map { it.trim() }.filter { it.isNotEmpty() }
-          if (acceleratorList.size == 1 && acceleratorList[0] == "npu") {
-            val socToModelFiles = allowedModel.socToModelFiles
-            if (socToModelFiles != null && !socToModelFiles.containsKey(SOC)) {
-              Log.d(
-                TAG,
-                "Ignoring model '${allowedModel.name}' because it's NPU-only and not supported on SOC: $SOC",
-              )
-              continue
-            }
-          }
-
-          val model = allowedModel.toModel()
-          _allowlistModels.add(model)
-          nameToModel.put(model.name, model)
-          for (taskType in allowedModel.taskTypes) {
-            val task = curTasks.find { it.id == taskType }
-            task?.models?.add(model)
-
-            if (task?.id == BuiltInTaskId.LLM_TINY_GARDEN) {
-              val newConfigs = model.configs.toMutableList()
-              newConfigs.add(RESET_CONVERSATION_TURN_COUNT_CONFIG)
-              model.configs = newConfigs
-            }
-          }
-        }
-
-        // Find models from allowlist if a task's `modelNames` field is not empty.
-        Log.d(TAG, "loadModelAllowlist: Processing task modelNames")
-        for (task in curTasks) {
-          if (task.modelNames.isNotEmpty()) {
-            for (modelName in task.modelNames) {
-              val model = nameToModel[modelName]
-              if (model == null) {
-                Log.w(TAG, "Model '$modelName' in task '${task.label}' not found in allowlist.")
-                continue
-              }
-              Log.d(TAG, "Adding model '$modelName' to task '${task.label}' from modelNames.")
-              task.models.add(model)
-            }
-          }
-        }
-
-        // Process all tasks.
-        Log.d(TAG, "loadModelAllowlist: Processing tasks")
-        processTasks()
-
-        // Update UI state.
-        Log.d(TAG, "loadModelAllowlist: Updating UI state")
-        _uiState.update {
-          createUiState()
-            .copy(
-              loadingModelAllowlist = false,
-              tasks = curTasks,
-              tasksByCategory = groupTasksByCategory(),
-            )
-        }
-
-        // Process pending downloads.
-        Log.d(TAG, "loadModelAllowlist: Processing pending downloads")
-        processPendingDownloads()
-
-        // Wait for AICore models statuses and update download indicators
-        Log.d(TAG, "loadModelAllowlist: Checking AICore model statuses")
-        checkAICoreModelStatuses()
-        Log.d(TAG, "loadModelAllowlist: Done")
+        processModelAllowlist(modelAllowlist = modelAllowlist)
       } catch (e: Exception) {
         Log.e(TAG, "Failed to load model allowlist", e)
       }
     }
+  }
+
+  /**
+   * Converts an allowlist into tasks/models and updates the UI state. Idempotent: clears the
+   * previously added models first, so it can safely run again with a refreshed allowlist.
+   */
+  private fun processModelAllowlist(
+    modelAllowlist: ModelAllowlist,
+    runStartupTasks: Boolean = true,
+  ) {
+    // Clear models from previous runs so re-processing doesn't duplicate entries.
+    _allowlistModels.clear()
+    for (customTask in getActiveCustomTasks()) {
+      customTask.task.models.clear()
+    }
+
+    Log.d(TAG, "Allowlist: $modelAllowlist")
+
+    val isAICoreAvailable by lazy {
+      Log.d(TAG, "processModelAllowlist: Checking AICore availability")
+      // Build a fast-lookup set of all supported device models.
+      // This extracts the models from all allowed groups, flattens them into a single stream,
+      // lowercases them for case-insensitive matching, and stores them in a Set.
+      val allowedDeviceModelsSet =
+        modelAllowlist.aicoreRequirements
+          ?.allowedDeviceGroups
+          ?.asSequence()
+          ?.flatMap { it.deviceModels }
+          ?.map { it.lowercase() }
+          ?.toSet()
+      isAICoreSupported(allowedDeviceModelsSet)
+    }
+
+    // Convert models in the allowlist.
+    Log.d(
+      TAG,
+      "processModelAllowlist: Converting models. Total models: ${modelAllowlist.models.size}",
+    )
+    val curTasks = getActiveCustomTasks().map { it.task }
+    val nameToModel = mutableMapOf<String, Model>()
+    for (allowedModel in modelAllowlist.models) {
+      if (allowedModel.disabled == true) {
+        continue
+      }
+
+      if (allowedModel.runtimeType == RuntimeType.AICORE && !isAICoreAvailable) {
+        continue
+      }
+
+      // Ignore the allowedModel if its accelerator is only npu and this device's soc is not in
+      // its socToModelFiles.
+      val accelerators = allowedModel.defaultConfig?.accelerators ?: ""
+      val acceleratorList = accelerators.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+      if (acceleratorList.size == 1 && acceleratorList[0] == "npu") {
+        val socToModelFiles = allowedModel.socToModelFiles
+        if (socToModelFiles != null && !socToModelFiles.containsKey(SOC)) {
+          Log.d(
+            TAG,
+            "Ignoring model '${allowedModel.name}' because it's NPU-only and not supported on SOC: $SOC",
+          )
+          continue
+        }
+      }
+
+      val model = allowedModel.toModel()
+      _allowlistModels.add(model)
+      nameToModel.put(model.name, model)
+      for (taskType in allowedModel.taskTypes) {
+        val task = curTasks.find { it.id == taskType }
+        task?.models?.add(model)
+
+        if (task?.id == BuiltInTaskId.LLM_TINY_GARDEN) {
+          val newConfigs = model.configs.toMutableList()
+          newConfigs.add(RESET_CONVERSATION_TURN_COUNT_CONFIG)
+          model.configs = newConfigs
+        }
+      }
+    }
+
+    // Find models from allowlist if a task's `modelNames` field is not empty.
+    Log.d(TAG, "processModelAllowlist: Processing task modelNames")
+    for (task in curTasks) {
+      if (task.modelNames.isNotEmpty()) {
+        for (modelName in task.modelNames) {
+          val model = nameToModel[modelName]
+          if (model == null) {
+            Log.w(TAG, "Model '$modelName' in task '${task.label}' not found in allowlist.")
+            continue
+          }
+          Log.d(TAG, "Adding model '$modelName' to task '${task.label}' from modelNames.")
+          task.models.add(model)
+        }
+      }
+    }
+
+    // Process all tasks.
+    Log.d(TAG, "processModelAllowlist: Processing tasks")
+    processTasks()
+
+    // Update UI state.
+    Log.d(TAG, "processModelAllowlist: Updating UI state")
+    _uiState.update {
+      createUiState()
+        .copy(
+          loadingModelAllowlist = false,
+          tasks = curTasks,
+          tasksByCategory = groupTasksByCategory(),
+        )
+    }
+
+    if (runStartupTasks) {
+      // Process pending downloads.
+      Log.d(TAG, "processModelAllowlist: Processing pending downloads")
+      processPendingDownloads()
+
+      // Wait for AICore models statuses and update download indicators
+      Log.d(TAG, "processModelAllowlist: Checking AICore model statuses")
+      checkAICoreModelStatuses()
+    }
+    Log.d(TAG, "processModelAllowlist: Done")
+  }
+
+  /**
+   * Silently refreshes the allowlist from the internet in the background, after the cached list
+   * has already been shown. On success the disk cache is updated and the UI is refreshed in
+   * place. Startup-only side effects (pending downloads, AICore status checks) are skipped.
+   */
+  private fun refreshModelAllowlistFromInternet() {
+    val version = BuildConfig.VERSION_NAME.replace(".", "_")
+    val url = getAllowlistUrl(version)
+    Log.d(TAG, "Refreshing model allowlist from internet. Url: $url")
+    val data = getJsonResponse<ModelAllowlist>(url = url)
+    val newAllowlist = data?.jsonObj
+    if (newAllowlist == null) {
+      Log.w(TAG, "Background refresh failed, keeping cached model allowlist")
+      return
+    }
+    Log.d(TAG, "Done: refreshing model allowlist from internet")
+    saveModelAllowlistToDisk(modelAllowlistContent = data?.textContent ?: "{}")
+    processModelAllowlist(modelAllowlist = newAllowlist, runStartupTasks = false)
   }
 
   fun clearLoadModelAllowlistError() {

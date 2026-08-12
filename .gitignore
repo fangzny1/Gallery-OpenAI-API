@@ -41,3 +41,6 @@ local.properties
 
 # Local dev notes (not for upload)
 AGENTS.md.kotlin/
+
+# Local dev notes (never upload)
+AGENTS.md
